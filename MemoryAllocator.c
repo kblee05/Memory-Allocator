@@ -5,12 +5,11 @@
 
 // compatible for both 32-bit 64-bit systems
 #define WORD sizeof(size_t)
-
+#define WORD_SHIFT (sizeof(size_t) == 8 ? 3 : 2)
 // padding for 32/64-bit systems
-// needs optimizing by bit operators
-#define ALIGN(x) ((((x)-1)/WORD)*WORD+WORD)
-
+#define ALIGN(x) (((((x) - 1) >> WORD_SHIFT) << WORD_SHIFT) + WORD) // -O0 compilers maybe?
 #define META_SIZE offsetof(meta_block, data)
+#define RELEASE_THRESHOLD (128 * 1024) // 128KB
 
 static meta_block *base = NULL;
 
@@ -96,26 +95,26 @@ static int is_valid_addr(void* p){
 
 void *my_malloc(size_t size){
     size = ALIGN(size);
-    if(base){ // base is initialized
-        meta_block *last;
-        meta_block *b = find_block(&last, size);
-        if(b){ // found a block
-            split_block(b, size);
-            return b->data;
-        }
-        else{ // didn't found a block / base = NULL
-            return extend_heap(last, size);
-        }
-    }
-    else{
+
+    if(!base)
         return extend_heap(base, size);
+
+    // base is initialized
+    meta_block *last;
+    meta_block *b = find_block(&last, size);
+
+    if(b){ // found a block
+        split_block(b, size);
+        return b->data;
     }
+    // didn't found a block / base = NULL
+    return extend_heap(last, size);
 }
 
 void *my_calloc(size_t number, size_t size){
     size_t total_size = ALIGN(number * size);
     size_t *new = my_malloc(total_size);
-    size_t clear_len = total_size / WORD;
+    size_t clear_len = total_size >> WORD_SHIFT;
     for(size_t i = 0; i < clear_len; i++){
         new[i] = 0;
     }
@@ -133,6 +132,7 @@ void *my_realloc(void *ptr, size_t size){
             split_block(block, size);
             return ptr; // block->data
         }
+        return ptr;
     }
     else{ // size > b
         if(block->next && block->next->free &&
@@ -166,7 +166,7 @@ void my_free(void* ptr){
         }
 
         if(block->next == NULL){ // currently last block of heap
-            if(block->size < 131072) // 128 * 1024, 128KB
+            if(block->size < RELEASE_THRESHOLD) // 128 * 1024, 128KB
                 return;
             
             if(block->prev){
@@ -181,7 +181,7 @@ void my_free(void* ptr){
     }
 }
 
-// for dubbing
+// for debugging
 
 #include <stdio.h>
 
