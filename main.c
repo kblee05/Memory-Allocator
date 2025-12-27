@@ -12,6 +12,10 @@ int main(int argc, char* argv[]){
     int *p2 = (int *) my_malloc(50);
     debug_heap();
 
+    printf("Malloc 4 bytes\n");
+    int *p3 = (int *) my_malloc(4);
+    debug_heap();
+    /*
     printf("Free p1\n");
     my_free(p1);
     debug_heap();
@@ -54,6 +58,6 @@ int main(int argc, char* argv[]){
     }
     printf("\n");
     debug_heap();
-    
+    */
     return 0;
 }

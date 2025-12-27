@@ -3,16 +3,12 @@
 
 #include <unistd.h>
 
-typedef struct meta_block meta_block;
+// https://sourceware.org/glibc/wiki/MallocInternals
 
-struct meta_block{
-    size_t size;
-    meta_block *next;
-    meta_block *prev;
-    size_t free; // Cannot determine whether the compiler will pad "int free"
-    void *ptr;
-    char data[1]; // Start address of DATA_BLOCK
-};
+// explicit free list
+// FREE Block : [Header - 8 Bytes] [Next pointer - 8 Bytes] [Prev pointer -8 Bytes] [Empty data ... ] [Footer - 8 Bytes]
+// ALLOCATED Block : [Header - 8 Bytes] [User Data.. ] [Footer - 8 Bytes]
+// Header & Footer : Use last bit for checking FREE
 
 void *my_malloc(size_t size);
 void *my_calloc(size_t number, size_t size);
