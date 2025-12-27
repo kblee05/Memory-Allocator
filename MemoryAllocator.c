@@ -28,8 +28,8 @@
 static void *base = NULL;
 
 static void remove_node(void *node){
-    void *next = NEXT_FREE(node);
-    void *prev = PREV_FREE(node);
+    void *next = *NEXT_FREE(node);
+    void *prev = *PREV_FREE(node);
     if(!prev){ // base == node
         base = next;
     }
@@ -52,20 +52,12 @@ static void insert_node(void *node){
 }
 
 static void *extend_heap(size_t chunk_size){
-    if(!base){
-        void *heap_start = sbrk(sizeof(size_t));
-        if(heap_start == (void *)-1)
-            return NULL;
-        
-        PUT(heap_start, 0);
-    }
-
     size_t *payload = (size_t *) sbrk(chunk_size); // payload + header + footer
     if(payload == (size_t *)-1){ // no more heap left
         return NULL;
     }
-    PUT(HEADER(payload), chunk_size | 0); // replace epilogue header as new header
-    PUT(FOOTER(payload), chunk_size | 0); // set not free
+    PUT(HEADER(payload), chunk_size | 1); // replace epilogue header as new header
+    PUT(FOOTER(payload), chunk_size | 1); // set free initially
     PUT(HEADER(RCHUNK(payload)), 0); // epilogue header
     return payload;
 }
@@ -141,9 +133,17 @@ static int is_valid_addr(void* p){
 void *my_malloc(size_t size){
     size_t aligned_size = ALIGN(size);
     size_t chunk_size = aligned_size > MIN_CHUNK_SIZE ? aligned_size : MIN_CHUNK_SIZE;
-
+    void *payload;
     if(!base){
-        return extend_heap(chunk_size);
+        void *heap_start = sbrk(sizeof(size_t));
+        if(heap_start == (void *)-1)
+            return NULL;
+        PUT(heap_start, 0);
+
+        payload = extend_heap(chunk_size);
+        PUT(HEADER(payload), chunk_size | 0); // replace epilogue header as new header
+        PUT(FOOTER(payload), chunk_size | 0); // set not free
+        return payload;
     }
 
     // base is initialized
@@ -151,10 +151,13 @@ void *my_malloc(size_t size){
 
     if(free_payload){ // found a block
         split_chunk(free_payload, chunk_size);
-        return free_payload;
+        payload = free_payload;
     }
     // didn't found a block / base = NULL
-    return extend_heap(chunk_size);
+    payload = extend_heap(chunk_size);
+    PUT(HEADER(payload), chunk_size | 0); // replace epilogue header as new header
+    PUT(FOOTER(payload), chunk_size | 0); // set not free
+    return payload;
 }
 
 void *my_calloc(size_t number, size_t size){
