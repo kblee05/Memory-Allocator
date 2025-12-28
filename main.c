@@ -2,8 +2,6 @@
 #include <stdio.h>
 
 int main(int argc, char* argv[]){
-    debug_heap();
-
     printf("Malloc 100 bytes\n");
     int *p1 = (int *) my_malloc(100);
     debug_heap();

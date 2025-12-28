@@ -3,110 +3,123 @@
 #include <unistd.h> // sbrk, brk
 #include <stdio.h> // debug purposes
 
+// implementation based on document below
+// https://sourceware.org/glibc/wiki/MallocInternals
+
 // compatible for both 32-bit 64-bit systems
-#define WORD sizeof(size_t)
-#define WORD_SHIFT (sizeof(size_t) == 8 ? 3 : 2)
-// padding for 32/64-bit systems
-#define ALIGN(x) (((((x) - 1) >> WORD_SHIFT) << WORD_SHIFT) + WORD) // -O0 compilers maybe?
+#define QWORD 8
+#define QWORD_BIT 3
+#define MIN_CHUNK_SIZE 32
 #define RELEASE_THRESHOLD (128 * 1024) // 128KB
-// HEADER + FOOTER + NEW + PREV
-#define MIN_CHUNK_SIZE (2 * sizeof(size_t) + 2 * sizeof(void *))
-#define GET(p) (*(size_t *)p)
-#define PUT(p, val) (*(size_t *)(p) = (val))
-#define PACK(size, free) ((size) | (free))
-#define GET_SIZE(p) (GET(p) & ~1)
-#define IS_FREE(p) (GET(p) & 1)
-#define HEADER(payload) ((size_t *)((char *)(payload) - (WORD)))
-#define FOOTER(payload) ((size_t *)((char *)(payload) + GET_SIZE(HEADER(payload)) - 2 * sizeof(size_t)))
-#define RCHUNK(payload) ((void *)((char *)(payload) + GET_SIZE(HEADER(payload))))
-#define LCHUNK(payload) ((void *)((char *)(payload) - GET_SIZE(((char *)(payload) - 2 * sizeof(size_t)))))
-#define NEXT_FREE(p) ((void **)(p))
-#define PREV_FREE(p) ((void **)((size_t *)p + 1))
-#define SET_NEXT_FREE(p, ptr) (*NEXT_FREE(p) = (ptr))
-#define SET_PREV_FREE(p, ptr) (*PREV_FREE(p) = (ptr))
+// padding for 32/64-bit systems
+#define ALIGN(x) (((((x) - 1) >> QWORD_BIT) << QWORD_BIT) + QWORD) // -O0 compilers maybe?
+#define SIZE(mchunkptr) (((mchunkptr)->size) & ~1)
+#define PREV_INUSE(mchunkptr) (((mchunkptr)->size) & 1)
 
-static void *base = NULL;
+static mchunk *base = NULL;
 
-static void remove_node(void *node){
-    void *next = *NEXT_FREE(node);
-    void *prev = *PREV_FREE(node);
-    if(!prev){ // base == node
-        base = next;
-    }
-    else{
-        SET_NEXT_FREE(prev, next);
-    }
+static void remove_node(mchunk *node){
+    mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
+    rchunk->size = rchunk->size | 1; // prev in use = 1
+
+    mchunk* fwd = node->fwd;
+    mchunk* bck = node->bck;
+
+    if(bck)
+        bck->fwd = fwd;
+    else
+        base = fwd;
     
-    if(next){
-        SET_PREV_FREE(next, prev);
-    }
+    if(fwd)
+        fwd->bck = bck;
 }
 
-static void insert_node(void *node){
-    SET_NEXT_FREE(node, base);
-    SET_PREV_FREE(node, NULL);
-    if(base){
-        SET_PREV_FREE(base, node);
-    }
+static void insert_node(mchunk *node){
+    mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
+    rchunk->size = rchunk->size & ~1; // prev in use = 1
+
+    mchunk *fwd = base;
+    node->fwd = fwd;
+    node->bck = NULL;
+
+    if(fwd)
+        fwd->bck = node;
+    
     base = node;
 }
 
-static void *extend_heap(size_t chunk_size){
-    size_t *payload = (size_t *) sbrk(chunk_size); // payload + header + footer
-    if(payload == (size_t *)-1){ // no more heap left
+static void *extend_heap(size_t size){
+    size_t *new_chunk = (size_t *) sbrk(size);
+    if(new_chunk == (size_t *)-1){ // no more heap left
         return NULL;
     }
-    PUT(HEADER(payload), chunk_size | 1); // replace epilogue header as new header
-    PUT(FOOTER(payload), chunk_size | 1); // set free initially
-    PUT(HEADER(RCHUNK(payload)), 0); // epilogue header
-    return payload;
+
+    mchunk *mchunkptr = (mchunk *)((char *)new_chunk - 2 * QWORD);
+    mchunkptr->size = size | PREV_INUSE(mchunkptr); // success prev in use
+    size_t *prev_size = (size_t *)((char *)mchunkptr + size);
+    *prev_size = size;
+    insert_node(mchunkptr);
+
+    mchunk *epilogue_hdr = (mchunk *)((char *)mchunkptr + size + QWORD);
+    epilogue_hdr->size = 0 | 0; // size = 0, prev in-use = 0
+    return mchunkptr;
 }
 
-static void *find_payload(size_t chunk_size){
-    size_t *curr = base;
+static void *find_chunk(size_t size){
+    mchunk *curr = base;
     while(curr){
-        if(IS_FREE(HEADER(curr)) && *HEADER(curr) >= chunk_size){ // Free
+        if(SIZE(curr) && SIZE(curr) >= size){ // Free & Enough size
             break;
         }
-        curr = *NEXT_FREE(curr);
+        curr = curr->fwd;
     }
     return curr;
 }
 
-static void split_chunk(void *payload, size_t chunk_size){ // free_ptr is the same as data_ptr for non-free blocks
-    if(GET_SIZE(payload) < chunk_size + MIN_CHUNK_SIZE)
+static void split_chunk(mchunk *mchunkptr, size_t size){ // free_ptr is the same as data_ptr for non-free blocks
+    if(mchunkptr->size < size + MIN_CHUNK_SIZE)
         return;
-    
-    size_t *header = HEADER(payload);
-    size_t prev_size = GET_SIZE(header);
-    *header = chunk_size & ~1; // set size and mark not free
-    *FOOTER(payload) = chunk_size | 0; // set footer
 
-    void *new_payload = (void *)((char *)payload + chunk_size);
-    size_t new_size = prev_size - chunk_size;
-    PUT(HEADER(new_payload), new_size | 1); // set leftover size and set free
-    PUT(FOOTER(new_payload), new_size | 1);
-    base = new_payload;
+    mchunk *new_mchunkptr = (mchunk *)((char *)mchunkptr + size);
+    new_mchunkptr->size = mchunkptr->size - size; // total size - split size, prev in use = 0
+    new_mchunkptr->prev_size = size;
 
-    remove_node(payload);
-    insert_node(new_payload);
+    // [original chunk] [new chunk] | [next chunk]
+    mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + new_mchunkptr->size);
+    next_mchunkptr->prev_size = new_mchunkptr->size;
+
+    // original chunk
+    mchunkptr->size = size | PREV_INUSE(mchunkptr);
+
+    insert_node(new_mchunkptr);
 }
 
-static void* fuse_chunk(void *curr){
-    void *rchunk = *(void **)RCHUNK(curr);
-    if(!rchunk) // no chunk at right
-        return curr;
-
-    if(!IS_FREE(HEADER(rchunk))){
-        return curr;
+static mchunk* fuse_chunk(mchunk *mchunkptr){
+    if((mchunkptr->prev_size & ~1) && !PREV_INUSE(mchunkptr)){ // not prologue header && prev in use = 0
+        mchunk *lchunk = (mchunk *)((char *)mchunkptr - mchunkptr->prev_size);
+        lchunk->size += mchunkptr->size;
+        size_t *prev_size = (size_t *)((char *)lchunk + lchunk->size);
+        *prev_size = SIZE(lchunk);
+        remove_node(mchunkptr);
+        mchunkptr = lchunk;
     }
 
-    size_t total_size = GET_SIZE(HEADER(curr)) + GET_SIZE(HEADER(rchunk));
-    PUT(HEADER(curr), total_size | 1);
-    PUT(FOOTER(curr), total_size | 1);
 
+    mchunk* rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+    if(!SIZE(rchunk)){ // epilogue hdr
+        return mchunkptr;
+    }
+
+    mchunk* rrchunk = (mchunk *)((char *)rchunk + SIZE(rchunk)); // well prev_in_use in rchunk is already 0
+    if(PREV_INUSE(rrchunk)){ // rchunk in use
+        return mchunkptr;
+    }
+
+    mchunkptr->size += rchunk->size; // rchunk prev in use = 0
+    size_t *prev_size = (size_t *)((char *)mchunkptr + SIZE(mchunkptr));
+    *prev_size = SIZE(mchunkptr);
     remove_node(rchunk);
-    return curr;
+    return mchunkptr;
 }
 
 /*
@@ -121,49 +134,61 @@ static void copy_block(meta_block *source, meta_block *dest){
 }
 */
 
+/*
 static int is_valid_addr(void* p){
     if(base){ // is the heap initialized?
-        if(p >  base && p < sbrk(0)){ // is the address between the start and break?
+        if(p < sbrk(0)){ // is the address between the start and break?
             return 1;
         }
     }
     return 0;
 }
+*/
+
+static int init = 0;
+
+void static my_malloc_init(){
+    size_t *prologue_hdr = (size_t *)sbrk(8);
+    if(prologue_hdr == (size_t *)-1)
+        return;
+    *prologue_hdr = 0 | 1; // size = 0, prev in use = 1
+    size_t *epilogue_hdr = (size_t *)sbrk(8);
+    if(epilogue_hdr == (size_t *)-1)
+        return;
+    *epilogue_hdr = 0 | 1; // size = 0, prev in use = 1
+    init = 1;
+}
 
 void *my_malloc(size_t size){
-    size_t aligned_size = ALIGN(size);
+    if(!init)
+        my_malloc_init();
+
+    size_t aligned_size = ALIGN(size + QWORD);
     size_t chunk_size = aligned_size > MIN_CHUNK_SIZE ? aligned_size : MIN_CHUNK_SIZE;
-    void *payload;
-    if(!base){
-        void *heap_start = sbrk(sizeof(size_t));
-        if(heap_start == (void *)-1)
-            return NULL;
-        PUT(heap_start, 0);
 
-        payload = extend_heap(chunk_size);
-        PUT(HEADER(payload), chunk_size | 0); // replace epilogue header as new header
-        PUT(FOOTER(payload), chunk_size | 0); // set not free
-        return payload;
+    // base = NULL > return NULL
+    // no suitable free chunk > return NULL
+    // suitable free chunk > return mchunk*
+    mchunk *mchunkptr = find_chunk(chunk_size);
+
+    if(!mchunkptr){
+        mchunkptr = extend_heap(chunk_size);
+        mchunkptr = fuse_chunk(mchunkptr);
+        remove_node(mchunkptr);
+        split_chunk(mchunkptr, chunk_size);
+        return mchunkptr->payload;
     }
 
-    // base is initialized
-    void *free_payload = find_payload(chunk_size);
-
-    if(free_payload){ // found a block
-        split_chunk(free_payload, chunk_size);
-        payload = free_payload;
-    }
-    // didn't found a block / base = NULL
-    payload = extend_heap(chunk_size);
-    PUT(HEADER(payload), chunk_size | 0); // replace epilogue header as new header
-    PUT(FOOTER(payload), chunk_size | 0); // set not free
-    return payload;
+    // found suitable free chunk
+    remove_node(mchunkptr);
+    split_chunk(mchunkptr, chunk_size);
+    return mchunkptr->payload;
 }
 
 void *my_calloc(size_t number, size_t size){
     size_t total_size = ALIGN(number * size);
     size_t *new = my_malloc(total_size);
-    size_t clear_len = total_size >> WORD_SHIFT;
+    size_t clear_len = total_size >> QWORD_BIT;
     for(size_t i = 0; i < clear_len; i++){
         new[i] = 0;
     }
@@ -241,7 +266,8 @@ void my_free(void* data_ptr){
 // for debugging
 
 void debug_heap(){
-    void *curr = base;
+    mchunk *curr = base;
+    printf("heap top: %p\n", sbrk(0));
     printf("\n[HEAP START]\n");
 
     if(!curr){
@@ -251,11 +277,10 @@ void debug_heap(){
     }
 
     while(curr){
-        printf("Header [%p] | Payload: %p | Size: %zu, | Free: %ld | Next: %p | Prev: %p\n",
-                HEADER(curr), curr, GET_SIZE(HEADER(curr)), IS_FREE(HEADER(curr)), 
-                *NEXT_FREE(curr), *PREV_FREE(curr));
+        printf("mchunkptr [%p] | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n", curr, curr->size & ~1, curr->size & 1, curr->fwd, curr->bck);
 
-        curr = *NEXT_FREE(curr);
+        curr = curr->fwd;
     }
+
     printf("[HEAP END]\n\n");
 }
