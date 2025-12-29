@@ -13,14 +13,29 @@
 #define RELEASE_THRESHOLD (128 * 1024) // 128KB
 // padding for 32/64-bit systems
 #define ALIGN(x) (((((x) - 1) >> QWORD_BIT) << QWORD_BIT) + QWORD) // -O0 compilers maybe?
-#define SIZE(mchunkptr) (((mchunkptr)->size) & ~1)
-#define PREV_INUSE(mchunkptr) (((mchunkptr)->size) & 1)
+#define SIZE(mchunkptr) (((mchunkptr)->hdr) & ~1)
+#define PREV_INUSE(mchunkptr) (((mchunkptr)->hdr) & 1)
 
 static mchunk *base = NULL;
 
 static void remove_node(mchunk *node){
     mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
-    rchunk->size = rchunk->size | 1; // prev in use = 1
+    rchunk->hdr = rchunk->hdr | 1; // prev in use = 1
+
+    mchunk* fwd = node->fwd;
+    mchunk* bck = node->bck;
+
+    if(bck)
+        bck->fwd = fwd;
+    else
+        base = fwd;
+    
+    if(fwd)
+        fwd->bck = bck;
+}
+
+static void absorb_node(mchunk *node){
+    // just absrob a free node to another free node, nothing "prev in use" changes
 
     mchunk* fwd = node->fwd;
     mchunk* bck = node->bck;
@@ -36,7 +51,7 @@ static void remove_node(mchunk *node){
 
 static void insert_node(mchunk *node){
     mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
-    rchunk->size = rchunk->size & ~1; // prev in use = 1
+    rchunk->hdr = rchunk->hdr & ~1; // prev in use = 0
 
     mchunk *fwd = base;
     node->fwd = fwd;
@@ -55,13 +70,13 @@ static void *extend_heap(size_t size){
     }
 
     mchunk *mchunkptr = (mchunk *)((char *)new_chunk - 2 * QWORD);
-    mchunkptr->size = size | PREV_INUSE(mchunkptr); // success prev in use
+    mchunkptr->hdr = size | PREV_INUSE(mchunkptr); // success prev in use
     size_t *prev_size = (size_t *)((char *)mchunkptr + size);
     *prev_size = size;
     insert_node(mchunkptr);
 
     mchunk *epilogue_hdr = (mchunk *)((char *)mchunkptr + size + QWORD);
-    epilogue_hdr->size = 0 | 0; // size = 0, prev in-use = 0
+    epilogue_hdr->hdr = 0 | 0; // size = 0, prev in-use = 0
     return mchunkptr;
 }
 
@@ -77,33 +92,32 @@ static void *find_chunk(size_t size){
 }
 
 static void split_chunk(mchunk *mchunkptr, size_t size){ // free_ptr is the same as data_ptr for non-free blocks
-    if(mchunkptr->size < size + MIN_CHUNK_SIZE)
+    if(mchunkptr->hdr < size + MIN_CHUNK_SIZE)
         return;
 
     mchunk *new_mchunkptr = (mchunk *)((char *)mchunkptr + size);
-    new_mchunkptr->size = mchunkptr->size - size; // total size - split size, prev in use = 0
+    new_mchunkptr->hdr = mchunkptr->hdr - size; // total size - split size, prev in use = 0
     new_mchunkptr->prev_size = size;
 
     // [original chunk] [new chunk] | [next chunk]
-    mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + new_mchunkptr->size);
-    next_mchunkptr->prev_size = new_mchunkptr->size;
+    mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + new_mchunkptr->hdr);
+    next_mchunkptr->prev_size = new_mchunkptr->hdr;
 
     // original chunk
-    mchunkptr->size = size | PREV_INUSE(mchunkptr);
+    mchunkptr->hdr = size | PREV_INUSE(mchunkptr);
 
     insert_node(new_mchunkptr);
 }
 
 static mchunk* fuse_chunk(mchunk *mchunkptr){
-    if((mchunkptr->prev_size & ~1) && !PREV_INUSE(mchunkptr)){ // not prologue header && prev in use = 0
+    if((mchunkptr->prev_size & ~1) && !PREV_INUSE(mchunkptr)){ // not prologue header & prev in use = 0
         mchunk *lchunk = (mchunk *)((char *)mchunkptr - mchunkptr->prev_size);
-        lchunk->size += mchunkptr->size;
-        size_t *prev_size = (size_t *)((char *)lchunk + lchunk->size);
-        *prev_size = SIZE(lchunk);
-        remove_node(mchunkptr);
+        lchunk->hdr += SIZE(mchunkptr);
+        mchunk *rchunk = (mchunk *)((char *)lchunk + SIZE(lchunk));
+        rchunk->prev_size = SIZE(lchunk);
+        absorb_node(mchunkptr);
         mchunkptr = lchunk;
     }
-
 
     mchunk* rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
     if(!SIZE(rchunk)){ // epilogue hdr
@@ -115,10 +129,10 @@ static mchunk* fuse_chunk(mchunk *mchunkptr){
         return mchunkptr;
     }
 
-    mchunkptr->size += rchunk->size; // rchunk prev in use = 0
+    mchunkptr->hdr += rchunk->hdr; // rchunk prev in use = 0
     size_t *prev_size = (size_t *)((char *)mchunkptr + SIZE(mchunkptr));
     *prev_size = SIZE(mchunkptr);
-    remove_node(rchunk);
+    absorb_node(rchunk);
     return mchunkptr;
 }
 
@@ -196,6 +210,7 @@ void *my_calloc(size_t number, size_t size){
 }
 
 void *my_realloc(void *ptr, size_t size){
+    
     /*
     if(!is_valid_addr(ptr))
         return NULL;
@@ -230,37 +245,18 @@ void *my_realloc(void *ptr, size_t size){
 }
 
 
-void my_free(void* data_ptr){
-    /*
-    if(is_valid_addr(data_ptr)){
-        size_t *header_ptr = (size_t *) data_ptr - 1;
-        *header_ptr = *header_ptr & ~1; // set NOT FREE
-
-        if()
-
-        if(block->prev && block->prev->free){
-            block = fuse_block(block->prev);
-        }
-
-        if(block->next && block->next->free){
-            fuse_block(block);
-        }
-
-        if(block->next == NULL){ // currently last block of heap
-            if(block->size < RELEASE_THRESHOLD) // 128 * 1024, 128KB
-                return;
-            
-            if(block->prev){
-                block->prev->next = NULL;
-            }
-            else{
-                base = NULL;
-            }
-            
-            brk(block);
-        }
+void my_free(void* ptr){
+    mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
+    insert_node(mchunkptr);
+    mchunkptr = fuse_chunk(mchunkptr);
+    mchunk *rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+    rchunk->prev_size = SIZE(mchunkptr);
+    
+    if(!SIZE(rchunk) && SIZE(mchunkptr) > RELEASE_THRESHOLD){ // rchunk = epilogue hdr, size > 128KB
+        remove_node(mchunkptr);
+        mchunkptr->hdr = PREV_INUSE(mchunkptr); // epilogue hdr : 0 | prev in use
+        brk(mchunkptr->payload);
     }
-        */
 }
 
 // for debugging
@@ -268,7 +264,7 @@ void my_free(void* data_ptr){
 void debug_heap(){
     mchunk *curr = base;
     printf("heap top: %p\n", sbrk(0));
-    printf("\n[HEAP START]\n");
+    printf("[HEAP START]\n");
 
     if(!curr){
         printf("Heap is Empty\n");
@@ -277,7 +273,7 @@ void debug_heap(){
     }
 
     while(curr){
-        printf("mchunkptr [%p] | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n", curr, curr->size & ~1, curr->size & 1, curr->fwd, curr->bck);
+        printf("mchunkptr [%p] | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n", curr, SIZE(curr), PREV_INUSE(curr), curr->fwd, curr->bck);
 
         curr = curr->fwd;
     }

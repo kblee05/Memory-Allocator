@@ -14,7 +14,7 @@ typedef struct mchunk mchunk;
 
 struct mchunk{
     size_t prev_size;
-    size_t size;
+    size_t hdr;
 
     union{
         struct{

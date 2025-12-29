@@ -13,6 +13,18 @@ int main(int argc, char* argv[]){
     printf("Malloc 4 bytes\n");
     int *p3 = (int *) my_malloc(4);
     debug_heap();
+
+    printf("Free p1\n");
+    my_free(p1);
+    debug_heap();
+
+    printf("Free p3\n");
+    my_free(p3);
+    debug_heap();
+
+    printf("Free p2\n");
+    my_free(p2);
+    debug_heap();
     /*
     printf("Free p1\n");
     my_free(p1);
