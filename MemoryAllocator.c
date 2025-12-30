@@ -6,17 +6,31 @@
 // implementation based on document below
 // https://sourceware.org/glibc/wiki/MallocInternals
 
-// compatible for both 32-bit 64-bit systems
 #define QWORD 8
 #define QWORD_BIT 3
 #define MIN_CHUNK_SIZE 32
 #define RELEASE_THRESHOLD (128 * 1024) // 128KB
-// padding for 32/64-bit systems
+// padding for 64-bit systems
 #define ALIGN(x) (((((x) - 1) >> QWORD_BIT) << QWORD_BIT) + QWORD) // -O0 compilers maybe?
 #define SIZE(mchunkptr) (((mchunkptr)->hdr) & ~1)
 #define PREV_INUSE(mchunkptr) (((mchunkptr)->hdr) & 1)
+#define BINS_COUNT 10 // 32, 64, 128, 256, 512, 1K, 2K, 4K, 8K, Large
 
-static mchunk *base = NULL;
+static mchunk dummyheads[BINS_COUNT];
+static mchunk *seg_free_list[BINS_COUNT];
+
+static size_t get_bin_index(size_t size){
+    if(size < 64) return 0;
+    if(size < 128) return 1;
+    if(size < 256) return 2;
+    if(size < 512) return 3;
+    if(size < 1024) return 4;
+    if(size < 2048) return 5;
+    if(size < 4096) return 6;
+    if(size < 8192) return 7;
+    if(size < 16384) return 8;
+    return 9;
+}
 
 static void remove_node(mchunk *node){
     mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
@@ -25,10 +39,7 @@ static void remove_node(mchunk *node){
     mchunk* fwd = node->fwd;
     mchunk* bck = node->bck;
 
-    if(bck)
-        bck->fwd = fwd;
-    else
-        base = fwd;
+    bck->fwd = fwd;
     
     if(fwd)
         fwd->bck = bck;
@@ -36,14 +47,10 @@ static void remove_node(mchunk *node){
 
 static void absorb_node(mchunk *node){
     // just absrob a free node to another free node, nothing "prev in use" changes
-
     mchunk* fwd = node->fwd;
     mchunk* bck = node->bck;
 
-    if(bck)
-        bck->fwd = fwd;
-    else
-        base = fwd;
+    bck->fwd = fwd;
     
     if(fwd)
         fwd->bck = bck;
@@ -53,14 +60,14 @@ static void insert_node(mchunk *node){
     mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
     rchunk->hdr = rchunk->hdr & ~1; // prev in use = 0
 
-    mchunk *fwd = base;
-    node->fwd = fwd;
-    node->bck = NULL;
+    mchunk *dummyhead = seg_free_list[get_bin_index(SIZE(node))];
+    node->fwd = dummyhead->fwd;
+    node->bck = dummyhead;
 
-    if(fwd)
-        fwd->bck = node;
+    if(node->fwd)
+        node->fwd->bck = node;
     
-    base = node;
+    dummyhead->fwd = node;
 }
 
 static void *extend_heap(size_t size){
@@ -81,14 +88,19 @@ static void *extend_heap(size_t size){
 }
 
 static void *find_chunk(size_t size){
-    mchunk *curr = base;
-    while(curr){
-        if(SIZE(curr) && SIZE(curr) >= size){ // Free & Enough size
-            break;
+    size_t index = get_bin_index(size) + 1;
+
+    for(; index < BINS_COUNT; index++){
+        mchunk *dummyhead = seg_free_list[index];
+        mchunk *curr = dummyhead->fwd;
+        while(curr){
+            if(SIZE(curr) && SIZE(curr) >= size){ // Free & Enough size
+                return curr;
+            }
+            curr = curr->fwd;
         }
-        curr = curr->fwd;
     }
-    return curr;
+    return NULL;
 }
 
 static void split_chunk(mchunk *mchunkptr, size_t size){
@@ -116,6 +128,8 @@ static mchunk* fuse_chunk(mchunk *mchunkptr){
         mchunk *rchunk = (mchunk *)((char *)lchunk + SIZE(lchunk));
         rchunk->prev_size = SIZE(lchunk);
         absorb_node(mchunkptr);
+        remove_node(lchunk);
+        insert_node(lchunk);
         mchunkptr = lchunk;
     }
 
@@ -133,6 +147,8 @@ static mchunk* fuse_chunk(mchunk *mchunkptr){
     size_t *prev_size = (size_t *)((char *)mchunkptr + SIZE(mchunkptr));
     *prev_size = SIZE(mchunkptr);
     absorb_node(rchunk);
+    remove_node(mchunkptr);
+    insert_node(mchunkptr);
     return mchunkptr;
 }
 
@@ -164,6 +180,14 @@ void static my_malloc_init(){
     if(epilogue_hdr == (size_t *)-1)
         return;
     *epilogue_hdr = 0 | 1; // size = 0, prev in use = 1
+
+    for(size_t i=0; i<BINS_COUNT; i++){
+        dummyheads[i].hdr = 0;
+        dummyheads[i].fwd = NULL;
+        dummyheads[i].bck = NULL;
+        seg_free_list[i] = &dummyheads[i];
+    }
+
     init = 1;
 }
 
@@ -260,20 +284,20 @@ void *my_realloc(void *ptr, size_t size){
 // for debugging
 
 void debug_heap(){
-    mchunk *curr = base;
     printf("heap top: %p\n", sbrk(0));
     printf("[HEAP START]\n");
 
-    if(!curr){
-        printf("Heap is Empty\n");
-        printf("[HEAP END]\n\n");
-        return;
-    }
-
-    while(curr){
-        printf("mchunkptr [%p] | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n", curr, SIZE(curr), PREV_INUSE(curr), curr->fwd, curr->bck);
-
+    for(int i=0; i<BINS_COUNT; i++){
+        if(!seg_free_list[i])
+            continue;
+        
+        mchunk *curr = seg_free_list[i];
         curr = curr->fwd;
+        if(curr) printf("segment %d\n", i);
+        while(curr){
+            printf("mchunkptr [%p] | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n", curr, SIZE(curr), PREV_INUSE(curr), curr->fwd, curr->bck);
+            curr = curr->fwd;
+        }
     }
 
     printf("[HEAP END]\n\n");

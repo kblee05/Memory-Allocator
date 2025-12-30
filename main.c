@@ -47,7 +47,7 @@ int main(int argc, char* argv[]){
     debug_heap();
     printf("p4: %d\n\n", *p4);
     
-    printf("Calloc 10 * int");
+    printf("Calloc 10 * int\n");
     int *p5 = (int *)my_calloc(10, sizeof(int));
     debug_heap();
     for(size_t i=0; i<10; i++){
