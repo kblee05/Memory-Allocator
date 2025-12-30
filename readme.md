@@ -1,44 +1,54 @@
-# 🚀 High-Performance Custom Memory Allocator
+# Custom Memory Allocator: Architectural Analysis and Optimization
 
-This project is a high-performance **Custom Memory Allocator** designed to outperform the standard **glibc malloc** in specific workloads (bulk allocation/free) by implementing an **Explicit Segregated List** and an **Arena Allocation** strategy.
+## 1. Overview
+This project involves the design and implementation of a C-based custom memory allocator. The study focuses on evaluating the performance trade-offs between different heap management strategies. By transitioning from an initial Implicit List to an Explicit Segregated List combined with an Arena allocation strategy, the allocator achieved a significant throughput increase, ultimately surpassing the performance of the standard glibc malloc in high-load stress tests.
 
-## 📊 Performance Optimization: 26x Leap
-Through iterative optimization, the allocator achieved a **26x performance increase** over the initial model, ultimately surpassing the throughput of the standard glibc library.
+## 2. Performance Comparison
 
-| Implementation Stage | Key Strategy | Throughput (ops/sec) | Remarks |
+| Implementation Phase | Strategy | Throughput (ops/sec) | Relative Performance |
 | :--- | :--- | :---: | :--- |
-| **Phase 1** | **Implicit List** | 38,507 | ~24x slower than glibc |
-| **Phase 2** | **Explicit Segregated List + Arena** | **1,023,751** 🏆 | **Outperformed glibc (926,312)** |
+| **Phase 1** | **Implicit List** | 38,507 | ~24x Slower than glibc |
+| **Phase 2** (Final) | **Explicit Segregated List + Arena** | **1,023,751** | **~10% Faster than glibc** |
+
+The initial implementation was bottlenecked by $O(N)$ search complexity, where allocation time increased linearly with the number of heap blocks. The final optimized version achieved a **26x throughput increase** by implementing constant-time binning and eliminating runtime system calls.
 
 ---
 
-## 🔍 Technical Analysis: The 26x Speedup
+## 3. Analysis of Failure Modes: Resolving Segmentation Faults
 
-### 1. Implicit vs. Explicit Segregated List
-* **Implicit List (Phase 1)**: Utilized a sequential search ($O(N)$) through all chunks, leading to significant performance degradation as the number of allocations increased.
-* **Explicit Segregated List (Phase 2)**: Maintained pointers only for free chunks using **Segregated Bins** categorized by size, minimizing search overhead.
-* **$O(1)$ Optimization**: Introduced **Sentinel Nodes (Dummy Heads)** for every bin to eliminate conditional branching (`if` statements) during node insertion/removal, achieving true constant-time operations.
+During the development of Phase 1, an incremental `sbrk` strategy (requesting memory in 2KB units) resulted in consistent Segmentation Faults after approximately 2,000 allocation cycles. Low-level debugging identified two primary system-level causes:
 
+1. **VMA Fragmentation and sbrk Non-contiguity**: Frequent, small-unit heap expansions increased the complexity of Virtual Memory Area (VMA) management within the OS. In a fragmented address space, `sbrk` calls can return non-contiguous memory regions, breaking the pointer arithmetic logic that assumes the new chunk header follows the previous epilogue.
+2. **Heap Exhaustion Handling**: The lack of robust handling for `sbrk(-1)` led to attempts to write metadata to invalid memory addresses during heap exhaustion events.
 
-
-### 2. Incremental sbrk vs. 128MB Arena Allocation
-* **Fragmented sbrk (Phase 1)**: Frequent 2KB-unit `sbrk` calls incurred heavy **System Call Overhead** (context switching) and caused potential heap boundary instability.
-* **Arena Strategy (Phase 2)**: Pre-allocated a contiguous **128MB Arena** during initialization, reducing system calls to zero during the benchmark. All allocations are fulfilled via **Split/Fuse** operations within user-space, maximizing raw performance.
+**Solution: 128MB Arena Allocation**
+The allocator was redesigned to use a **128MB Arena** strategy. By pre-allocating a large, contiguous memory block during initialization, the system ensured memory layout stability and reduced the system-call overhead to zero during the benchmark execution.
 
 ---
 
-## 🌟 Integrity & Stability Verification
+## 4. Technical Implementation Details
 
-### [Performance Benchmark]
-Comparison between the standard glibc malloc and the Custom Allocator under identical stress tests.
-![Benchmark Comparison](./trial_1.png)
+### 4.1. Explicit Segregated List with Sentinel Nodes
+The final version utilizes segregated bins to categorize free chunks by size. To optimize list manipulation, **Sentinel Nodes (Dummy Heads)** were implemented for every bin.
+* **Branchless Operations**: This design eliminates conditional branches for empty or single-node lists, ensuring $O(1)$ operations for node insertion and removal.
+* **Alignment**: All metadata and payloads are strictly aligned to 8-byte boundaries to satisfy hardware requirements and prevent alignment-related faults.
 
-### [Full Coalescing Verification]
-Verified that the heap perfectly recovers into a single 128MB block after 10,000 randomized allocation/free cycles, proving the robustness of the coalescing logic.
 
-```text
-heap top: 0x5f027b92c010
-[HEAP START]
-segment 9
-mchunkptr [0x5f027392c000] | size: 134217728 | status: FREE
-[HEAP END]
+
+### 4.2. Boundary Tagging and Immediate Coalescing
+Bi-directional coalescing is facilitated through `hdr` and `prev_size` boundary tags.
+* **Integrity Verification**: Stress tests with 10,000 randomized cycles confirmed that the heap successfully recovers into a single 128MB free block without leakage.
+* **Debug Output**: `mchunkptr [0x5f027392c000] | size: 134217728` (Validates 100% coalescing efficiency).
+
+---
+
+## 5. Conclusion
+This project demonstrates that while the standard glibc malloc is engineered for general-purpose robustness, significant performance gains can be achieved for specific high-load workloads by **minimizing system-call frequency** and **optimizing data structures for search efficiency**. The transition from 38K to 1M ops/sec highlights the critical impact of algorithmic selection and OS interaction on systems software performance.
+
+---
+
+## 6. Usage
+```bash
+make
+./bench_my   # Execute Custom Allocator Benchmark
+./bench_std  # Execute Standard glibc malloc Benchmark
