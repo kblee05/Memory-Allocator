@@ -91,7 +91,7 @@ static void *find_chunk(size_t size){
     return curr;
 }
 
-static void split_chunk(mchunk *mchunkptr, size_t size){ // free_ptr is the same as data_ptr for non-free blocks
+static void split_chunk(mchunk *mchunkptr, size_t size){
     if(mchunkptr->hdr < size + MIN_CHUNK_SIZE)
         return;
 
@@ -100,7 +100,7 @@ static void split_chunk(mchunk *mchunkptr, size_t size){ // free_ptr is the same
     new_mchunkptr->prev_size = size;
 
     // [original chunk] [new chunk] | [next chunk]
-    mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + new_mchunkptr->hdr);
+    mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + SIZE(new_mchunkptr));
     next_mchunkptr->prev_size = new_mchunkptr->hdr;
 
     // original chunk
@@ -136,28 +136,22 @@ static mchunk* fuse_chunk(mchunk *mchunkptr){
     return mchunkptr;
 }
 
-/*
-static void copy_block(meta_block *source, meta_block *dest){
-    size_t *source_data, *dest_data;
-    source_data = (size_t *) source->data;
-    dest_data = (size_t *) dest->data;
-    size_t copy_len = (source->size < dest->size ? source->size : dest->size) / WORD;
-    for(size_t i = 0; i  < copy_len; i++){
-        dest_data[i] = source_data[i];
-    }
-}
-*/
+static void my_memcpy(void *dest, mchunk *src){
+    size_t size = SIZE(src) - QWORD;
+    size_t i;
 
-/*
-static int is_valid_addr(void* p){
-    if(base){ // is the heap initialized?
-        if(p < sbrk(0)){ // is the address between the start and break?
-            return 1;
-        }
+    for(i = 0; i + QWORD <= size; i += QWORD){
+        size_t *dest_register = (size_t *)((char *)dest + i);
+        size_t *src_register = (size_t *)((char *)(src->payload) + i);
+        *dest_register = *src_register;
     }
-    return 0;
+    
+    for(; i < size; i++){
+        char *dest_byte = (char *)dest + i;
+        char *src_byte = (char *)(src->payload) + i;
+        *dest_byte = *src_byte;
+    }
 }
-*/
 
 static int init = 0;
 
@@ -190,60 +184,14 @@ void *my_malloc(size_t size){
         mchunkptr = fuse_chunk(mchunkptr);
         remove_node(mchunkptr);
         split_chunk(mchunkptr, chunk_size);
-        return mchunkptr->payload;
+        return (void *)mchunkptr->payload;
     }
 
     // found suitable free chunk
     remove_node(mchunkptr);
     split_chunk(mchunkptr, chunk_size);
-    return mchunkptr->payload;
+    return (void *)mchunkptr->payload;
 }
-
-void *my_calloc(size_t number, size_t size){
-    size_t total_size = ALIGN(number * size);
-    size_t *new = my_malloc(total_size);
-    size_t clear_len = total_size >> QWORD_BIT;
-    for(size_t i = 0; i < clear_len; i++){
-        new[i] = 0;
-    }
-    return new;
-}
-
-void *my_realloc(void *ptr, size_t size){
-    
-    /*
-    if(!is_valid_addr(ptr))
-        return NULL;
-
-    meta_block *block = get_block(ptr);
-    if(size == block->size) return block->data;
-    else if(size < block->size){
-        if(block->size >= size + META_SIZE + WORD){
-            split_block(block, size);
-            return ptr; // block->data
-        }
-        return ptr;
-    }
-    else{ // size > b
-        if(block->next && block->next->free &&
-            size <= block->size + block->next->size + META_SIZE){
-            fuse_block(block);
-            split_block(block, size);
-            return ptr; // block->data
-        }
-        else{
-            void *new_ptr = my_malloc(size);
-            if(!ptr) // no heap left
-                return NULL;
-            meta_block *new_block = get_block(new_ptr);
-            copy_block(block, new_block);
-            my_free(ptr);
-            return new_ptr; // new_bloc->data
-        }
-    }
-        */
-}
-
 
 void my_free(void* ptr){
     mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
@@ -258,6 +206,56 @@ void my_free(void* ptr){
         brk(mchunkptr->payload);
     }
 }
+
+void *my_calloc(size_t number, size_t size){
+    size_t *new = my_malloc(number * size);
+    mchunk *mchunkptr = (mchunk *)((char *)new - 2 * QWORD);
+    size_t clear_len = SIZE(mchunkptr) - QWORD; // padded by 8bytes
+    for(size_t i = 0; i * QWORD < clear_len; i++){
+        new[i] = 0;
+    }
+    return (void *)new;
+}
+
+void *my_realloc(void *ptr, size_t size){
+    size_t aligned_size = ALIGN(size + QWORD);
+    size_t chunk_size = aligned_size > MIN_CHUNK_SIZE ? aligned_size : MIN_CHUNK_SIZE;
+    mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
+
+    if(chunk_size <= SIZE(mchunkptr) + MIN_CHUNK_SIZE){ // split
+        split_chunk(mchunkptr, chunk_size);
+        mchunk* rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+        fuse_chunk(rchunk);
+        return (void *)mchunkptr->payload;
+    }
+
+    if(chunk_size > SIZE(mchunkptr)){
+        mchunk *rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+        
+        if(!SIZE(rchunk)){ // epilogue hdr
+            extend_heap(chunk_size - SIZE(mchunkptr)); // rchunk -> new chunk
+            remove_node(rchunk);
+            mchunkptr->hdr += SIZE(rchunk);
+            return (void *)mchunkptr->payload;
+        }
+
+        mchunk *rrchunk = (mchunk *)((char *)rchunk + SIZE(rchunk));
+        if(PREV_INUSE(rrchunk) || SIZE(mchunkptr) + SIZE(rchunk) < chunk_size){ // rchunk is not sufficient for expansion
+            void *new_payload = my_malloc(size);
+            my_memcpy(new_payload, mchunkptr); // dest, source
+            my_free(mchunkptr->payload);
+            return (void *)new_payload;
+        }
+
+        // right chunk is sufficient for expansion
+        remove_node(rchunk);
+        mchunkptr->hdr += SIZE(rchunk);
+        split_chunk(mchunkptr, chunk_size);
+        return (void *)mchunkptr->payload;
+    }
+}
+
+
 
 // for debugging
 
