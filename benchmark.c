@@ -42,7 +42,7 @@ int main() {
     }
 
     end = clock();
-    
+    //debug_heap(); Succeeded for my_malloc: One big chunk of 128MB
     double time_taken = ((double)(end - start)) / CLOCKS_PER_SEC;
     double ops = (ITERATIONS * 2.0) / time_taken;
 

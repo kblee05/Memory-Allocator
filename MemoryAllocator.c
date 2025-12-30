@@ -71,8 +71,9 @@ static void insert_node(mchunk *node){
 }
 
 static void *extend_heap(size_t size){
-    size_t *new_chunk = (size_t *) sbrk(size);
-    if(new_chunk == (size_t *)-1){ // no more heap left
+    void *new_chunk = (void *) sbrk(size);
+    if(new_chunk == (void *)-1){ // no more heap left
+        printf("ERROR: HEAP EXHAUSTION\n");
         return NULL;
     }
 
@@ -113,7 +114,7 @@ static void split_chunk(mchunk *mchunkptr, size_t size){
 
     // [original chunk] [new chunk] | [next chunk]
     mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + SIZE(new_mchunkptr));
-    next_mchunkptr->prev_size = new_mchunkptr->hdr;
+    next_mchunkptr->prev_size = SIZE(new_mchunkptr);
 
     // original chunk
     mchunkptr->hdr = size | PREV_INUSE(mchunkptr);
@@ -188,6 +189,8 @@ void static my_malloc_init(){
         seg_free_list[i] = &dummyheads[i];
     }
 
+    extend_heap(RELEASE_THRESHOLD*1024); // 128MB
+
     init = 1;
 }
 
@@ -205,6 +208,8 @@ void *my_malloc(size_t size){
 
     if(!mchunkptr){
         mchunkptr = extend_heap(chunk_size);
+        if (!mchunkptr)
+            return NULL;
         mchunkptr = fuse_chunk(mchunkptr);
         remove_node(mchunkptr);
         split_chunk(mchunkptr, chunk_size);
@@ -212,8 +217,8 @@ void *my_malloc(size_t size){
     }
 
     // found suitable free chunk
-    remove_node(mchunkptr);
     split_chunk(mchunkptr, chunk_size);
+    remove_node(mchunkptr);
     return (void *)mchunkptr->payload;
 }
 
@@ -224,7 +229,7 @@ void my_free(void* ptr){
     mchunk *rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
     rchunk->prev_size = SIZE(mchunkptr);
     
-    if(!SIZE(rchunk) && SIZE(mchunkptr) > RELEASE_THRESHOLD){ // rchunk = epilogue hdr, size > 128KB
+    if(!SIZE(rchunk) && SIZE(mchunkptr) > RELEASE_THRESHOLD * 1024 * 2){ // rchunk = epilogue hdr, size > 256MB
         remove_node(mchunkptr);
         mchunkptr->hdr = PREV_INUSE(mchunkptr); // epilogue hdr : 0 | prev in use
         brk(mchunkptr->payload);
