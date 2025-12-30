@@ -71,7 +71,9 @@ static void insert_node(mchunk *node){
 }
 
 static void *extend_heap(size_t size){
-    void *new_chunk = (void *) sbrk(size);
+    // for real productions, just sbrk by something like 128MB regardless of argument "size" to prevent system call errors
+    // from testing, reptitive calls of sbrk (> 2000) caused segfault, but getting big chunks occasionally prevented seg fault
+    void *new_chunk = (void *) sbrk(size); 
     if(new_chunk == (void *)-1){ // no more heap left
         printf("ERROR: HEAP EXHAUSTION\n");
         return NULL;
