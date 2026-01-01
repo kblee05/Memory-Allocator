@@ -8,3 +8,6 @@ bench_std
 libmymalloc.a
 
 .makefile.swp
+
+main1.c
+main.c

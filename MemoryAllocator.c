@@ -2,6 +2,7 @@
 #include <stddef.h> // size_t, offsetof
 #include <unistd.h> // sbrk, brk
 #include <stdio.h> // debug purposes
+#include <string.h>
 
 // implementation based on document below
 // https://sourceware.org/glibc/wiki/MallocInternals
@@ -286,9 +287,38 @@ void *my_realloc(void *ptr, size_t size){
     }
 }
 
+/*
+ *  Functions for char*, string copy
+ */
+
+static void my_strcpy(char* dest, char* src){
+    while(*src != '\0'){
+        *dest = *src;
+        dest++;
+        src++;
+    }
+    *dest = '\0';
+}
+
+char *my_strdup(char *s){
+    if(s == NULL)
+        return NULL;
+
+    size_t len = strlen(s) + 1; // plus one for '\0'
+    char *new_str = my_malloc(len); // sizeof(char) = 1
+
+    if(new_str){
+        my_strcpy(new_str, s);
+    }
+
+    return new_str;
+}
 
 
-// for debugging
+
+/*
+ *   for debugging
+ */
 
 void debug_heap(){
     printf("heap top: %p\n", sbrk(0));
