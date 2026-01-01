@@ -1,4 +1,7 @@
-all: main bench_my bench_std
+all: main bench_my bench_std libmymalloc.a
+
+libmymalloc: MemoryAllocator.o MemoryAllocator.h
+	ar rcs libmymalloc.a MemoryAllocator.o
 
 main: main.o MemoryAllocator.o
 	gcc -o main main.o MemoryAllocator.o

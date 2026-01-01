@@ -4,3 +4,7 @@ main
 
 bench_my
 bench_std
+
+libmymalloc.a
+
+.makefile.swp
