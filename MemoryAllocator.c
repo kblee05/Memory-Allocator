@@ -198,7 +198,7 @@ void static my_malloc_init(){
     init = 1;
 }
 
-pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *_my_malloc_unlocked(size_t size);
 
