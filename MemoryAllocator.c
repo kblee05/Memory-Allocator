@@ -3,6 +3,7 @@
 #include <unistd.h> // sbrk, brk
 #include <stdio.h> // debug purposes
 #include <string.h>
+#include <pthread.h>
 
 // implementation based on document below
 // https://sourceware.org/glibc/wiki/MallocInternals
@@ -197,7 +198,18 @@ void static my_malloc_init(){
     init = 1;
 }
 
+pthread_mutex_t malloc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *_my_malloc_unlocked(size_t size);
+
 void *my_malloc(size_t size){
+    pthread_mutex_lock(&malloc_lock);
+    void *ptr = _my_malloc_unlocked(size);
+    pthread_mutex_unlock(&malloc_lock);
+    return ptr;
+}
+
+static void *_my_malloc_unlocked(size_t size){
     if(!init)
         my_malloc_init();
 
@@ -211,21 +223,34 @@ void *my_malloc(size_t size){
 
     if(!mchunkptr){
         mchunkptr = extend_heap(chunk_size);
-        if (!mchunkptr)
+        if (!mchunkptr){
             return NULL;
+        }
         mchunkptr = fuse_chunk(mchunkptr);
         remove_node(mchunkptr);
         split_chunk(mchunkptr, chunk_size);
+
         return (void *)mchunkptr->payload;
     }
 
     // found suitable free chunk
     split_chunk(mchunkptr, chunk_size);
     remove_node(mchunkptr);
+
     return (void *)mchunkptr->payload;
 }
 
+static void _my_free_unlocked(void* ptr);
+
 void my_free(void* ptr){
+    pthread_mutex_lock(&malloc_lock);
+    _my_free_unlocked(ptr);
+    pthread_mutex_unlock(&malloc_lock);
+}
+
+static void _my_free_unlocked(void* ptr){
+    if(ptr == NULL) return;
+
     mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
     insert_node(mchunkptr);
     mchunkptr = fuse_chunk(mchunkptr);
@@ -249,7 +274,20 @@ void *my_calloc(size_t number, size_t size){
     return (void *)new;
 }
 
+static void *_my_realloc_unlocked(void *ptr, size_t size);
+
 void *my_realloc(void *ptr, size_t size){
+    pthread_mutex_lock(&malloc_lock);
+    void *new_ptr = _my_realloc_unlocked(ptr, size);
+    pthread_mutex_unlock(&malloc_lock);
+    return new_ptr;
+}
+
+static void *_my_realloc_unlocked(void *ptr, size_t size){
+    if(ptr == NULL){
+        return _my_malloc_unlocked(size);
+    }
+
     size_t aligned_size = ALIGN(size + QWORD);
     size_t chunk_size = aligned_size > MIN_CHUNK_SIZE ? aligned_size : MIN_CHUNK_SIZE;
     mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
@@ -273,9 +311,9 @@ void *my_realloc(void *ptr, size_t size){
 
         mchunk *rrchunk = (mchunk *)((char *)rchunk + SIZE(rchunk));
         if(PREV_INUSE(rrchunk) || SIZE(mchunkptr) + SIZE(rchunk) < chunk_size){ // rchunk is not sufficient for expansion
-            void *new_payload = my_malloc(size);
+            void *new_payload = _my_malloc_unlocked(size);
             my_memcpy(new_payload, mchunkptr); // dest, source
-            my_free(mchunkptr->payload);
+            _my_free_unlocked(mchunkptr->payload);
             return (void *)new_payload;
         }
 
@@ -283,6 +321,7 @@ void *my_realloc(void *ptr, size_t size){
         remove_node(rchunk);
         mchunkptr->hdr += SIZE(rchunk);
         split_chunk(mchunkptr, chunk_size);
+
         return (void *)mchunkptr->payload;
     }
 }
