@@ -82,8 +82,6 @@ static void *extend_heap(size_t size)
     	size_t sbrk_size = PAGE_SIZE > size ? PAGE_SIZE : size;
 	void *new_chunk = sbrk(sbrk_size);
 
-	printf("--Extend heap: %lu\n", sbrk_size);
-
     	if (new_chunk == (void *)-1) { // no more heap left
         	fprintf(stderr, "ERROR: HEAP EXHAUSTION\n");
         	return NULL;
@@ -115,8 +113,6 @@ static void *find_chunk(size_t size)
 			curr = curr->fwd;
 		}
 	}
-
-	printf("couldnt find\n");
 
 	return NULL;
 }
@@ -160,7 +156,7 @@ static mchunk* fuse_chunk(mchunk *mchunkptr)
 	mchunk* rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
 	
 	 // epilogue hdr
-	if (!SIZE(rchunk))
+	if (SIZE(rchunk) == 0)
 		return mchunkptr;
 
 	mchunk* rrchunk = (mchunk *)((char *)rchunk + SIZE(rchunk)); // well prev_in_use in rchunk is already 0
