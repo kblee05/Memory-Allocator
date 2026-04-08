@@ -164,13 +164,13 @@ static mchunk* fuse_chunk(mchunk *mchunkptr)
 		mchunkptr = lchunk;
 	}
 
-	mchunk* rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+	mchunk* rchunk = get_rchunk(mchunkptr);
 	
 	 // epilogue hdr
 	if (SIZE(rchunk) == 0)
 		return mchunkptr;
 
-	mchunk* rrchunk = (mchunk *)((char *)rchunk + SIZE(rchunk)); // well prev_in_use in rchunk is already 0
+	mchunk* rrchunk = get_rchunk(rchunk); // well prev_in_use in rchunk is already 0
 	
 	// rchunk in use
 	if (PREV_INUSE(rrchunk))
@@ -336,7 +336,7 @@ static void *my_realloc_unlocked(void *ptr, size_t size)
 
 	if (chunk_size <= SIZE(mchunkptr) + MIN_CHUNK_SIZE) {
 		split_chunk(mchunkptr, chunk_size);
-		mchunk* rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+		mchunk* rchunk = get_rchunk(mchunkptr);
 		fuse_chunk(rchunk);
 
 		return (void *)mchunkptr->payload;
@@ -354,7 +354,7 @@ static void *my_realloc_unlocked(void *ptr, size_t size)
 		return (void *)mchunkptr->payload;
 	}
 
-	mchunk *rrchunk = (mchunk *)((char *)rchunk + SIZE(rchunk));
+	mchunk *rrchunk = get_rchunk(rchunk);
 
 	// rchunk is not sufficient for expansion
 	if (PREV_INUSE(rrchunk) || SIZE(mchunkptr) + SIZE(rchunk) < chunk_size) {
