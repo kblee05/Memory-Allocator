@@ -37,9 +37,19 @@ static int get_bin_index(size_t size)
 	return index;
 }
 
+static mchunk *get_rchunk(mchunk *mchunkptr)
+{
+	return (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
+}
+
+static mchunk *get_lchunk(mchunk *mchunkptr)
+{
+	return (mchunk *)((char *)mchunkptr - mchunkptr->prev_size);
+}
+
 static void remove_node(mchunk *node)
 {
-	mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
+	mchunk* rchunk = get_rchunk(node);
 	rchunk->hdr |= 1; // prev in use = 1
 
 	mchunk* fwd = node->fwd;
@@ -64,7 +74,7 @@ static void absorb_node(mchunk *node)
 
 static void insert_node(mchunk *node)
 {
-	mchunk* rchunk = (mchunk*)((char *)node + SIZE(node));
+	mchunk* rchunk = get_rchunk(node);
 	rchunk->hdr &= ~1; // prev in use = 0
 
 	mchunk *dummyhead = seg_free_list[get_bin_index(SIZE(node))];
@@ -87,14 +97,15 @@ static void *extend_heap(size_t size)
         	return NULL;
     	}
 
-    	mchunk *mchunkptr = (mchunk *)((char *)new_chunk - 2 * QWORD);
-    	mchunkptr->hdr = sbrk_size | PREV_INUSE(mchunkptr); // success prev in use
-    	size_t *prev_size = (size_t *)((char *)mchunkptr + sbrk_size);
-    	*prev_size = sbrk_size;
+	// consider epilogue header (16 bytes)
+	// don't have to change prev size and prev in use
+    	mchunk *mchunkptr = (mchunk *)((char *)new_chunk - DQWORD);
+    	mchunkptr->hdr = sbrk_size | PREV_INUSE(mchunkptr);
     	insert_node(mchunkptr);
 
-    	mchunk *epilogue_hdr = (mchunk *)((char *)mchunkptr + sbrk_size + QWORD);
-    	epilogue_hdr->hdr = 0 | 0; // size = 0, prev in-use = 0
+	mchunk *epilogue = get_rchunk(mchunkptr);
+	epilogue->prev_size = sbrk_size;
+	epilogue->hdr = 0 | 0;
 
     	return mchunkptr;
 }
@@ -130,7 +141,7 @@ static void split_chunk(mchunk *mchunkptr, size_t size)
 	insert_node(new_mchunkptr);
 
 	// [original chunk] [new chunk] | [next chunk]
-	mchunk *next_mchunkptr = (mchunk *)((char *)new_mchunkptr + SIZE(new_mchunkptr));
+	mchunk *next_mchunkptr = get_rchunk(new_mchunkptr);
 	// prev in use = 0
 	next_mchunkptr->prev_size = SIZE(new_mchunkptr);
 
@@ -139,11 +150,11 @@ static void split_chunk(mchunk *mchunkptr, size_t size)
 
 static mchunk* fuse_chunk(mchunk *mchunkptr)
 {
-	// not prologue header & prev in use = 0
-	if ((mchunkptr->prev_size & ~1) && !PREV_INUSE(mchunkptr)) {
-		mchunk *lchunk = (mchunk *)((char *)mchunkptr - mchunkptr->prev_size);
+	// not start of heap & prev in use = 0
+	if (mchunkptr->prev_size > 0 && !PREV_INUSE(mchunkptr)) {
+		mchunk *lchunk = get_lchunk(mchunkptr);
+		mchunk *rchunk = get_rchunk(mchunkptr);
 		lchunk->hdr += SIZE(mchunkptr);
-		mchunk *rchunk = (mchunk *)((char *)lchunk + SIZE(lchunk));
 		rchunk->prev_size = SIZE(lchunk);
 		// mchunkptr is assumed to be free
 		// we should not manipulate active memory
@@ -197,17 +208,15 @@ static int malloc_init = 0;
 
 void static my_malloc_init()
 {
-    	size_t *prologue_hdr = (size_t *)sbrk(DQWORD);
+    	mchunk *epilogue = (mchunk *)sbrk(DQWORD);
     
-	if (prologue_hdr == (size_t *)-1)
+	if (epilogue == (mchunk *)-1)
         	return;
-    
-	// size = 0, prev in use = 1
-	*prologue_hdr = 0 | 1;
-    	
-	size_t *epilogue_hdr = prologue_hdr + 1;
-	// size = 0, prev in use = 1
-	*epilogue_hdr = 0 | 1;
+	
+	// prev size = 0;
+	// size = 16, prev in use = 1
+	epilogue->prev_size = 0;
+	epilogue->hdr = DQWORD | 1;
 
     	for (int i=0; i < BINS_COUNT; i++) {
         	dummyheads[i].hdr = 0;
@@ -236,7 +245,7 @@ static void *my_malloc_unlocked(size_t size)
     	if(!malloc_init)
         	my_malloc_init();
 
-    	size_t aligned_size = ALIGN(size + QWORD);
+    	size_t aligned_size = ALIGN(size + DQWORD);
     	size_t chunk_size = aligned_size > MIN_CHUNK_SIZE ? aligned_size : MIN_CHUNK_SIZE;
 
     	// base = NULL > return NULL
@@ -274,17 +283,17 @@ void my_free(void* ptr)
 }
 
 static void my_free_unlocked(void* ptr){
-	if(ptr == NULL)
+	if (ptr == NULL)
 		return;
 
-	mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
+	mchunk *mchunkptr = (mchunk *)((char *)ptr - DQWORD);
 	insert_node(mchunkptr);
 	mchunkptr = fuse_chunk(mchunkptr);
-	mchunk *rchunk = (mchunk *)((char *)mchunkptr + SIZE(mchunkptr));
-	rchunk->prev_size = SIZE(mchunkptr);
+
+	mchunk *rchunk = get_rchunk(mchunkptr);
 
 	// epilogue header + returning memory to system
-	if(SIZE(rchunk) == 0 && SIZE(mchunkptr) > RELEASE_THRESHOLD){
+	if (SIZE(rchunk) == 0 && SIZE(mchunkptr) > RELEASE_THRESHOLD) {
 		remove_node(mchunkptr);
 		mchunkptr->hdr = PREV_INUSE(mchunkptr); // epilogue hdr : 0 | prev in use
 		int retval = brk(mchunkptr->payload);
@@ -296,14 +305,13 @@ static void my_free_unlocked(void* ptr){
 
 void *my_calloc(size_t number, size_t size)
 {
-	size_t *new = my_malloc(number * size);
-	mchunk *mchunkptr = (mchunk *)((char *)new - 2 * QWORD);
-	size_t clear_len = (SIZE(mchunkptr) - QWORD) / QWORD;
+	size_t *new_mem = my_malloc(number * size);
+	size_t clear_len = number * size / QWORD;
 
-	for (size_t i = 0; i < clear_len; i++)
-		new[i] = 0;
+	for (int i = 0; i < clear_len; i++)
+		new_mem[i] = 0;
 	
-	return (void *)new;
+	return (void *)new_mem;
 }
 
 static void *my_realloc_unlocked(void *ptr, size_t size);
@@ -417,8 +425,9 @@ void debug_heap()
 			printf("segment %d\n", i);
 		
 		while (curr) {
-			printf("mchunkptr [%p] | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n",
+			printf("mchunkptr [%p] | prev size: %ld | size: %ld | prev in use: %ld | fwd: %p | bck: %p\n",
 				curr,
+				curr->prev_size,
 				SIZE(curr),
 				PREV_INUSE(curr),
 				curr->fwd,

@@ -8,7 +8,7 @@
 // explicit free list
 // FREE Block : [Header - 8 Bytes] [Next pointer - 8 Bytes] [Prev pointer -8 Bytes] [Empty data ... ] [Footer - 8 Bytes]
 // ALLOCATED Block : [Header - 8 Bytes] [User Data.. ] [Footer - 8 Bytes]
-// Header & Footer : Use last bit for checking FREE
+// Header : Use last bit for checking FREE
 
 typedef struct mchunk mchunk;
 
