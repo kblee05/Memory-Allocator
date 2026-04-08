@@ -330,9 +330,9 @@ static void *my_realloc_unlocked(void *ptr, size_t size)
 	if(ptr == NULL)
 		return my_malloc_unlocked(size);
 
-	size_t aligned_size = ALIGN(size + QWORD);
+	size_t aligned_size = ALIGN(size + DQWORD);
 	size_t chunk_size = aligned_size > MIN_CHUNK_SIZE ? aligned_size : MIN_CHUNK_SIZE;
-	mchunk *mchunkptr = (mchunk *)((char *)ptr - 2 * QWORD);
+	mchunk *mchunkptr = (mchunk *)((char *)ptr - DQWORD);
 
 	if (chunk_size <= SIZE(mchunkptr) + MIN_CHUNK_SIZE) {
 		split_chunk(mchunkptr, chunk_size);
